@@ -1,0 +1,48 @@
+import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.util.Collector;
+import org.bson.Document;
+
+public class MongoDBFieldStream {
+    public static void main(String[] args) throws Exception {
+        // Set up Flink execution environment
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Source: MongoDB Document Stream
+        DataStream<Document> mongoStream = env.addSource(
+                new MongoDBSource("mongodb://localhost:27017", "testDB", "testCollection")
+        );
+
+        // Dynamically transform MongoDB document fields into a stream
+        DataStream<String> fieldStream = mongoStream.flatMap(new FlatMapFunction<Document, String>() {
+            @Override
+            public void flatMap(Document document, Collector<String> out) throws Exception {
+                // Iterate through each field in the document
+                flattenDocument(document, out);
+            }
+        });
+
+        // Print the resulting stream for debugging
+        fieldStream.print();
+
+        // Execute the Flink job
+        env.execute("MongoDB Field Stream");
+    }
+
+    // Recursive method to flatten the document
+    private static void flattenDocument(Document document, Collector<String> out) {
+        document.forEach((key, value) -> {
+            // If the value is a sub-document (nested object), recurse
+            if (value instanceof Document) {
+                flattenDocument((Document) value, out); // Recurse into sub-document
+            } else {
+                // Directly format the output as a string (key-value pair)
+                String output = String.format("{\"fieldname\":\"%s\",\"value\":\"%s\",\"metadata\":\"someMetadataValue\"}",
+                        key, value != null ? value.toString() : "null");
+                // Emit the formatted string
+                out.collect(output);
+            }
+        });
+    }
+}
