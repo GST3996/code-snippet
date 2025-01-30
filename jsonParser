@@ -1,58 +1,92 @@
-import com.mongodb.client.MongoClient;
-import com.mongodb.client.MongoClients;
-import com.mongodb.client.MongoCollection;
-import com.mongodb.client.MongoDatabase;
-import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.flink.api.common.state.ValueState;
+import org.apache.flink.api.common.state.ValueStateDescriptor;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.ConnectedStreams;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.co.CoProcessFunction;
 import org.apache.flink.util.Collector;
-import org.bson.Document;
 
-public class MongoDBFlinkStreaming {
-    private static final String MONGO_URI = "mongodb://localhost:27017";
-    private static final String DATABASE_NAME = "mydatabase";
-    private static final String COLLECTION_NAME = "mycollection";
-
+public class FlinkFilteredJoinJsonStreams {
     public static void main(String[] args) throws Exception {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-        // Example input stream (could be a Kafka topic or another source)
-        DataStream<String> inputStream = env.fromElements("key1", "key2", "key3");
+        // User JSON Stream
+        DataStream<String> userStream = env.fromElements(
+                "{\"id\": 1, \"name\": \"Alice\", \"age\": 25}",
+                "{\"id\": 2, \"name\": \"Bob\", \"age\": 30}",
+                "{\"id\": 3, \"name\": \"Charlie\", \"age\": 35}"
+        );
 
-        DataStream<String> mongoStream = inputStream.flatMap(new MongoDBFetcher());
+        // Order JSON Stream
+        DataStream<String> orderStream = env.fromElements(
+                "{\"orderId\": 101, \"userId\": 1, \"amount\": 250.75}",
+                "{\"orderId\": 102, \"userId\": 2, \"amount\": 99.99}",
+                "{\"orderId\": 103, \"userId\": 3, \"amount\": 150.00}"
+        );
 
-        mongoStream.print(); // Output the retrieved documents as JSON
+        // Connect user and order streams
+        ConnectedStreams<String, String> connectedStreams = userStream.connect(orderStream);
 
-        env.execute("Flink MongoDB Streaming");
+        // Process and merge based on ID
+        DataStream<String> mergedStream = connectedStreams.process(new FilteredUserOrderJoinFunction());
+
+        // Print the final merged output
+        mergedStream.print("Merged Stream");
+
+        env.execute("Flink Filtered JSON Join");
     }
 
-    public static class MongoDBFetcher extends RichFlatMapFunction<String, String> {
-        private transient MongoClient mongoClient;
-        private transient MongoCollection<Document> collection;
+    public static class FilteredUserOrderJoinFunction extends CoProcessFunction<String, String, String> {
+        private transient ValueState<String> userState;
+        private transient ValueState<String> orderState;
+        private static final ObjectMapper objectMapper = new ObjectMapper();
 
         @Override
         public void open(Configuration parameters) {
-            // Establish MongoDB connection once per task
-            mongoClient = MongoClients.create(MONGO_URI);
-            MongoDatabase database = mongoClient.getDatabase(DATABASE_NAME);
-            collection = database.getCollection(COLLECTION_NAME);
+            userState = getRuntimeContext().getState(new ValueStateDescriptor<>("userState", String.class));
+            orderState = getRuntimeContext().getState(new ValueStateDescriptor<>("orderState", String.class));
         }
 
         @Override
-        public void flatMap(String key, Collector<String> out) {
-            // Query MongoDB using the stream's key
-            Document doc = collection.find(new Document("key", key)).first();
-            if (doc != null) {
-                out.collect(doc.toJson()); // Convert BSON to JSON string
+        public void processElement1(String userJson, Context ctx, Collector<String> out) throws Exception {
+            JsonNode userNode = objectMapper.readTree(userJson);
+            int userId = userNode.get("id").asInt(); // Extract user ID
+
+            String orderJson = orderState.value();
+            if (orderJson != null) {
+                // Both user and order exist, merge them
+                out.collect(mergeJson(userNode, orderJson));
+                orderState.clear();
+            } else {
+                // Store user data until order arrives
+                userState.update(userJson);
             }
         }
 
         @Override
-        public void close() {
-            if (mongoClient != null) {
-                mongoClient.close();
+        public void processElement2(String orderJson, Context ctx, Collector<String> out) throws Exception {
+            JsonNode orderNode = objectMapper.readTree(orderJson);
+            int userId = orderNode.get("userId").asInt(); // Extract user ID
+
+            String userJson = userState.value();
+            if (userJson != null) {
+                // Both user and order exist, merge them
+                out.collect(mergeJson(objectMapper.readTree(userJson), orderJson));
+                userState.clear();
+            } else {
+                // Store order data until user arrives
+                orderState.update(orderJson);
             }
+        }
+
+        private String mergeJson(JsonNode userNode, String orderJson) throws Exception {
+            ObjectNode merged = (ObjectNode) objectMapper.readTree(orderJson);
+            merged.put("name", userNode.get("name").asText()); // Add only "name" from user JSON
+            return objectMapper.writeValueAsString(merged);
         }
     }
 }
