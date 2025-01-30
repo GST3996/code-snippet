@@ -1,6 +1,26 @@
-private DataStream<String> getDataStreamFromCollection(StreamExecutionEnvironment env) {
+import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
+public class MongoDataStreamProcessor {
+    
+    private final ObjectMapper objectMapper = new ObjectMapper();
+    
+    private DataStream<String> getDataStreamFromCollection(StreamExecutionEnvironment env) {
         return env.fromSource(
                 dbConfig.createMongoSource(collection), WatermarkStrategy.noWatermarks(),
-                "MongoDB-Source-" + collection);
+                "MongoDB-Source-" + collection
+        ).filter(new FilterFunction<String>() {
+            @Override
+            public boolean filter(String jsonString) throws Exception {
+                JsonNode jsonNode = objectMapper.readTree(jsonString);
+                // Example: Filtering only documents where "status" is "active"
+                return jsonNode.has("status") && "active".equals(jsonNode.get("status").asText());
+            }
+        });
     }
+}
