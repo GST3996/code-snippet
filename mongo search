@@ -1,0 +1,53 @@
+import org.apache.flink.api.common.functions.FilterFunction;
+import org.apache.flink.connector.mongodb.source.MongoSource;
+import org.apache.flink.connector.mongodb.source.reader.deserializer.JsonStringMongoDeserializationSchema;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+
+import java.util.Arrays;
+import java.util.List;
+
+public class FlinkMongoDynamicFilter {
+    public static void main(String[] args) throws Exception {
+        // Accept dynamic search values (e.g., passed as command-line args or environment variables)
+        List<String> searchCriteria = Arrays.asList("age", "email"); // Can be replaced with dynamic input
+
+        // Set up Flink environment
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Define MongoDB Source with a query filter
+        MongoSource<String> mongoSource = MongoSource.builder()
+            .setUri("mongodb://localhost:27017")  // Change as needed
+            .setDatabase("myDatabase")           // Your database name
+            .setCollection("referenceData")      // Your collection name
+            .setQuery("{ \"referenceProperty\": { \"$in\": " + toJsonArray(searchCriteria) + " } }")  // Dynamic filtering
+            .setDeserializer(new JsonStringMongoDeserializationSchema())
+            .build();
+
+        // Create DataStream from MongoDB source
+        DataStream<String> mongoStream = env.fromSource(
+            mongoSource, 
+            org.apache.flink.api.common.eventtime.WatermarkStrategy.noWatermarks(), 
+            "MongoDB Source"
+        );
+
+        // Print the filtered data
+        mongoStream.print();
+
+        // Execute the Flink job
+        env.execute("Flink MongoDB Dynamic Filter Example");
+    }
+
+    // Convert List<String> to a JSON array format for MongoDB query
+    private static String toJsonArray(List<String> list) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < list.size(); i++) {
+            sb.append("\"").append(list.get(i)).append("\"");
+            if (i < list.size() - 1) {
+                sb.append(",");
+            }
+        }
+        sb.append("]");
+        return sb.toString();
+    }
+}
