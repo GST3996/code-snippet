@@ -1,92 +1,130 @@
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
-import org.apache.flink.api.common.state.ValueState;
-import org.apache.flink.api.common.state.ValueStateDescriptor;
-import org.apache.flink.configuration.Configuration;
+import org.apache.flink.api.common.functions.FlatMapFunction;
+import org.apache.flink.api.common.functions.JoinFunction;
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.ConnectedStreams;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
-import org.apache.flink.streaming.api.functions.co.CoProcessFunction;
+import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.util.Collector;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 
-public class FlinkFilteredJoinJsonStreams {
+import java.util.Iterator;
+import java.util.Map;
+
+public class FlinkJsonJoinExample {
     public static void main(String[] args) throws Exception {
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        ObjectMapper objectMapper = new ObjectMapper();
 
-        // User JSON Stream
+        // Simulated DataStream<String> for User JSON
         DataStream<String> userStream = env.fromElements(
-                "{\"id\": 1, \"name\": \"Alice\", \"age\": 25}",
-                "{\"id\": 2, \"name\": \"Bob\", \"age\": 30}",
-                "{\"id\": 3, \"name\": \"Charlie\", \"age\": 35}"
+            "{\"id\": 1, \"name\": \"John Doe\", \"email\": \"john.doe@example.com\", \"age\": 30, \"city\": \"Chennai\"}",
+            "{\"id\": 2, \"name\": \"Jane Smith\", \"email\": \"jane.smith@example.com\", \"age\": 28, \"city\": \"Bangalore\"}"
         );
 
-        // Order JSON Stream
-        DataStream<String> orderStream = env.fromElements(
-                "{\"orderId\": 101, \"userId\": 1, \"amount\": 250.75}",
-                "{\"orderId\": 102, \"userId\": 2, \"amount\": 99.99}",
-                "{\"orderId\": 103, \"userId\": 3, \"amount\": 150.00}"
+        // Simulated DataStream<String> for Reference JSON
+        DataStream<String> referenceStream = env.fromElements(
+            "{\"key\": \"A1\", \"value\": 100, \"description\": \"Sample Data 1\", \"referenceProperty\": \"age\", \"status\": \"active\"}",
+            "{\"key\": \"A2\", \"value\": 200, \"description\": \"Sample Data 2\", \"referenceProperty\": \"email\", \"status\": \"inactive\"}"
         );
 
-        // Connect user and order streams
-        ConnectedStreams<String, String> connectedStreams = userStream.connect(orderStream);
+        // Convert user JSON into key-value pairs
+        DataStream<KeyValuePair> userKeyValueStream = userStream.flatMap(new FlatMapFunction<String, KeyValuePair>() {
+            @Override
+            public void flatMap(String value, Collector<KeyValuePair> out) throws Exception {
+                JsonNode jsonNode = objectMapper.readTree(value);
+                Iterator<Map.Entry<String, JsonNode>> fields = jsonNode.fields();
+                while (fields.hasNext()) {
+                    Map.Entry<String, JsonNode> field = fields.next();
+                    out.collect(new KeyValuePair(field.getKey(), field.getValue().asText()));
+                }
+            }
+        });
 
-        // Process and merge based on ID
-        DataStream<String> mergedStream = connectedStreams.process(new FilteredUserOrderJoinFunction());
+        // Convert reference JSON into a POJO
+        DataStream<ReferenceData> referenceDataStream = referenceStream.map(value -> 
+            objectMapper.readValue(value, ReferenceData.class)
+        ).returns(TypeInformation.of(ReferenceData.class));
 
-        // Print the final merged output
-        mergedStream.print("Merged Stream");
+        // Perform a Join Operation (by matching user properties with reference properties)
+        DataStream<OutputRecord> outputRecordStream = userKeyValueStream
+            .join(referenceDataStream)
+            .where(KeyValuePair::getKey)
+            .equalTo(ReferenceData::getReferenceProperty)
+            .window(Time.seconds(5)) // Optional time window
+            .apply(new JoinFunction<KeyValuePair, ReferenceData, OutputRecord>() {
+                @Override
+                public OutputRecord join(KeyValuePair userKV, ReferenceData ref) {
+                    return new OutputRecord(ref.getKey(), userKV.getValue(), ref.getDescription(), ref.getStatus());
+                }
+            });
 
-        env.execute("Flink Filtered JSON Join");
+        // Convert OutputRecord to JSON String
+        DataStream<String> jsonStringStream = outputRecordStream.map(new MapFunction<OutputRecord, String>() {
+            @Override
+            public String map(OutputRecord record) throws Exception {
+                return objectMapper.writeValueAsString(record);
+            }
+        });
+
+        // Print the result
+        jsonStringStream.print();
+
+        env.execute("Flink JSON Stream Join Example");
     }
 
-    public static class FilteredUserOrderJoinFunction extends CoProcessFunction<String, String, String> {
-        private transient ValueState<String> userState;
-        private transient ValueState<String> orderState;
-        private static final ObjectMapper objectMapper = new ObjectMapper();
+    // POJO for User JSON key-value pair
+    public static class KeyValuePair {
+        private String key;
+        private String value;
 
-        @Override
-        public void open(Configuration parameters) {
-            userState = getRuntimeContext().getState(new ValueStateDescriptor<>("userState", String.class));
-            orderState = getRuntimeContext().getState(new ValueStateDescriptor<>("orderState", String.class));
+        public KeyValuePair() {}
+
+        public KeyValuePair(String key, String value) {
+            this.key = key;
+            this.value = value;
         }
 
-        @Override
-        public void processElement1(String userJson, Context ctx, Collector<String> out) throws Exception {
-            JsonNode userNode = objectMapper.readTree(userJson);
-            int userId = userNode.get("id").asInt(); // Extract user ID
+        public String getKey() { return key; }
+        public String getValue() { return value; }
+    }
 
-            String orderJson = orderState.value();
-            if (orderJson != null) {
-                // Both user and order exist, merge them
-                out.collect(mergeJson(userNode, orderJson));
-                orderState.clear();
-            } else {
-                // Store user data until order arrives
-                userState.update(userJson);
-            }
+    // POJO for Reference JSON
+    public static class ReferenceData {
+        private String key;
+        private String referenceProperty;
+        private String description;
+        private String status;
+
+        public ReferenceData() {}
+
+        public String getKey() { return key; }
+        public String getReferenceProperty() { return referenceProperty; }
+        public String getDescription() { return description; }
+        public String getStatus() { return status; }
+    }
+
+    // POJO for Output JSON
+    public static class OutputRecord {
+        private String paramId;
+        private String paramValue;
+        private String description;
+        private String status;
+
+        public OutputRecord() {}
+
+        public OutputRecord(String paramId, String paramValue, String description, String status) {
+            this.paramId = paramId;
+            this.paramValue = paramValue;
+            this.description = description;
+            this.status = status;
         }
 
-        @Override
-        public void processElement2(String orderJson, Context ctx, Collector<String> out) throws Exception {
-            JsonNode orderNode = objectMapper.readTree(orderJson);
-            int userId = orderNode.get("userId").asInt(); // Extract user ID
-
-            String userJson = userState.value();
-            if (userJson != null) {
-                // Both user and order exist, merge them
-                out.collect(mergeJson(objectMapper.readTree(userJson), orderJson));
-                userState.clear();
-            } else {
-                // Store order data until user arrives
-                orderState.update(orderJson);
-            }
-        }
-
-        private String mergeJson(JsonNode userNode, String orderJson) throws Exception {
-            ObjectNode merged = (ObjectNode) objectMapper.readTree(orderJson);
-            merged.put("name", userNode.get("name").asText()); // Add only "name" from user JSON
-            return objectMapper.writeValueAsString(merged);
-        }
+        public String getParamId() { return paramId; }
+        public String getParamValue() { return paramValue; }
+        public String getDescription() { return description; }
+        public String getStatus() { return status; }
     }
 }
