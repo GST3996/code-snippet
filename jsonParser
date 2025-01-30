@@ -1,26 +1,58 @@
-import org.apache.flink.api.common.functions.FilterFunction;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import com.mongodb.client.MongoClient;
+import com.mongodb.client.MongoClients;
+import com.mongodb.client.MongoCollection;
+import com.mongodb.client.MongoDatabase;
+import org.apache.flink.api.common.functions.RichFlatMapFunction;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
-import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.util.Collector;
+import org.bson.Document;
 
-public class MongoDataStreamProcessor {
-    
-    private final ObjectMapper objectMapper = new ObjectMapper();
-    
-    private DataStream<String> getDataStreamFromCollection(StreamExecutionEnvironment env) {
-        return env.fromSource(
-                dbConfig.createMongoSource(collection), WatermarkStrategy.noWatermarks(),
-                "MongoDB-Source-" + collection
-        ).filter(new FilterFunction<String>() {
-            @Override
-            public boolean filter(String jsonString) throws Exception {
-                JsonNode jsonNode = objectMapper.readTree(jsonString);
-                // Example: Filtering only documents where "status" is "active"
-                return jsonNode.has("status") && "active".equals(jsonNode.get("status").asText());
+public class MongoDBFlinkStreaming {
+    private static final String MONGO_URI = "mongodb://localhost:27017";
+    private static final String DATABASE_NAME = "mydatabase";
+    private static final String COLLECTION_NAME = "mycollection";
+
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Example input stream (could be a Kafka topic or another source)
+        DataStream<String> inputStream = env.fromElements("key1", "key2", "key3");
+
+        DataStream<String> mongoStream = inputStream.flatMap(new MongoDBFetcher());
+
+        mongoStream.print(); // Output the retrieved documents as JSON
+
+        env.execute("Flink MongoDB Streaming");
+    }
+
+    public static class MongoDBFetcher extends RichFlatMapFunction<String, String> {
+        private transient MongoClient mongoClient;
+        private transient MongoCollection<Document> collection;
+
+        @Override
+        public void open(Configuration parameters) {
+            // Establish MongoDB connection once per task
+            mongoClient = MongoClients.create(MONGO_URI);
+            MongoDatabase database = mongoClient.getDatabase(DATABASE_NAME);
+            collection = database.getCollection(COLLECTION_NAME);
+        }
+
+        @Override
+        public void flatMap(String key, Collector<String> out) {
+            // Query MongoDB using the stream's key
+            Document doc = collection.find(new Document("key", key)).first();
+            if (doc != null) {
+                out.collect(doc.toJson()); // Convert BSON to JSON string
             }
-        });
+        }
+
+        @Override
+        public void close() {
+            if (mongoClient != null) {
+                mongoClient.close();
+            }
+        }
     }
 }
