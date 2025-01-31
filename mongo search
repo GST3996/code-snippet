@@ -16,13 +16,16 @@ public class FlinkMongoDynamicFilter {
         final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
         // Define MongoDB Source with a query filter
-        MongoSource<String> mongoSource = MongoSource.builder()
-            .setUri("mongodb://localhost:27017")  // Change as needed
-            .setDatabase("myDatabase")           // Your database name
-            .setCollection("referenceData")      // Your collection name
-            .setQuery("{ \"referenceProperty\": { \"$in\": " + toJsonArray(searchCriteria) + " } }")  // Dynamic filtering
-            .setDeserializer(new JsonStringMongoDeserializationSchema())
-            .build();
+       MongoSource<String> mongoSource = MongoSource.builder()
+    .setUri("mongodb://localhost:27017")
+    .setDatabase("myDatabase")
+    .setCollection("referenceData")
+    .setPipeline(Arrays.asList(
+        Document.parse("{ \"$match\": { \"referenceProperty\": { \"$in\": " + toJsonArray(searchCriteria) + " } } }")
+    ))
+    .setDeserializer(new JsonStringMongoDeserializationSchema())
+    .build();
+
 
         // Create DataStream from MongoDB source
         DataStream<String> mongoStream = env.fromSource(
