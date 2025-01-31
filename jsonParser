@@ -128,3 +128,33 @@ public class FlinkJsonJoinExample {
         public String getStatus() { return status; }
     }
 }
+
+import org.apache.flink.streaming.api.functions.timestamps.AscendingTimestampExtractor;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.watermark.Watermark;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import java.time.Duration;
+
+// Assign timestamps and watermarks
+DataStream<KeyValuePair> userKeyValueStream = userStream.flatMap(new FlatMapFunction<String, KeyValuePair>() {
+    @Override
+    public void flatMap(String value, Collector<KeyValuePair> out) throws Exception {
+        JsonNode jsonNode = objectMapper.readTree(value);
+        Iterator<Map.Entry<String, JsonNode>> fields = jsonNode.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> field = fields.next();
+            out.collect(new KeyValuePair(field.getKey(), field.getValue().asText(), System.currentTimeMillis()));
+        }
+    }
+}).assignTimestampsAndWatermarks(
+    WatermarkStrategy.<KeyValuePair>forBoundedOutOfOrderness(Duration.ofSeconds(2))
+    .withTimestampAssigner((element, recordTimestamp) -> element.getTimestamp())
+);
+
+DataStream<ReferenceData> referenceDataStream = referenceStream.map(value -> 
+    objectMapper.readValue(value, ReferenceData.class)
+).returns(TypeInformation.of(ReferenceData.class)).assignTimestampsAndWatermarks(
+    WatermarkStrategy.<ReferenceData>forBoundedOutOfOrderness(Duration.ofSeconds(2))
+    .withTimestampAssigner((element, recordTimestamp) -> System.currentTimeMillis())
+);
+
