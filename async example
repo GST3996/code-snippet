@@ -1,0 +1,64 @@
+import org.apache.flink.api.common.functions.RichMapFunction;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.functions.async.AsyncFunction;
+import org.apache.flink.streaming.api.functions.async.AsyncDataStream;
+import org.apache.flink.streaming.api.functions.async.ResultFuture;
+
+import java.util.Collections;
+import java.util.concurrent.*;
+
+public class FlinkAsyncExample {
+
+    public static void main(String[] args) throws Exception {
+        final StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+
+        // Sample input stream
+        DataStream<String> inputStream = env.fromElements("A", "B", "C", "D");
+
+        // Apply async function
+        DataStream<String> asyncProcessedStream = AsyncDataStream.unorderedWait(
+                inputStream,
+                new SampleAsyncFunction(),
+                5000, // Timeout in milliseconds
+                TimeUnit.MILLISECONDS,
+                20 // Capacity of the async operation
+        );
+
+        asyncProcessedStream.print();
+
+        env.execute("Flink Async Example");
+    }
+
+    public static class SampleAsyncFunction implements AsyncFunction<String, String> {
+        private transient ExecutorService executor;
+
+        @Override
+        public void open(Configuration parameters) {
+            executor = Executors.newFixedThreadPool(10);
+        }
+
+        @Override
+        public void asyncInvoke(String input, ResultFuture<String> resultFuture) {
+            CompletableFuture.supplyAsync(() -> {
+                return performAsyncOperation(input);
+            }, executor).thenAccept(result -> resultFuture.complete(Collections.singleton(result)));
+        }
+
+        private String performAsyncOperation(String input) {
+            try {
+                // Simulating a delay (e.g., external API call)
+                Thread.sleep(1000);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+            return "Processed-" + input;
+        }
+
+        @Override
+        public void close() throws Exception {
+            executor.shutdown();
+        }
+    }
+}
