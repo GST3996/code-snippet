@@ -1,65 +1,52 @@
-import org.apache.flink.api.common.serialization.SimpleStringSchema;
-import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
-import org.apache.flink.connector.kafka.sink.KafkaSink;
-import org.apache.flink.connector.kafka.source.KafkaSource;
-import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
-import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.common.acl.AclBinding;
+import org.apache.kafka.common.acl.AclOperation;
+import org.apache.kafka.common.acl.AclPermissionType;
+import org.apache.kafka.common.resource.ResourcePattern;
+import org.apache.kafka.common.resource.ResourceType;
 
+import java.util.Collection;
+import java.util.Collections;
 import java.util.Properties;
 
-public class FlinkKafkaSSLTest {
-    private static final String BOOTSTRAP_SERVERS = "broker1:9093,broker2:9093";
-    private static final String TEST_TOPIC = "test-topic";
-    private static final String GROUP_ID = "flink-test-group";
+public class KafkaAclChecker {
 
-    private static Properties getSSLProperties() {
+    private static final String BOOTSTRAP_SERVERS = "broker1:9093,broker2:9093";
+    private static final String TOPIC_NAME = "test-topic";
+
+    private static Properties getAdminProperties() {
         Properties props = new Properties();
-        props.setProperty("bootstrap.servers", BOOTSTRAP_SERVERS);
-        props.setProperty("security.protocol", "SSL");
-        props.setProperty("ssl.keystore.location", "/path/to/client.keystore.jks");
-        props.setProperty("ssl.keystore.password", "keystore-password");
-        props.setProperty("ssl.key.password", "key-password");
-        props.setProperty("ssl.truststore.location", "/path/to/client.truststore.jks");
-        props.setProperty("ssl.truststore.password", "truststore-password");
+        props.put(AdminClientConfig.BOOTSTRAP_SERVERS_CONFIG, BOOTSTRAP_SERVERS);
+        props.put("security.protocol", "SSL"); // Change to SASL_SSL if using SASL
+        props.put("ssl.keystore.location", "/path/to/client.keystore.jks");
+        props.put("ssl.keystore.password", "keystore-password");
+        props.put("ssl.truststore.location", "/path/to/client.truststore.jks");
+        props.put("ssl.truststore.password", "truststore-password");
         return props;
     }
 
-    public static void main(String[] args) throws Exception {
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+    public static void fetchAcls() {
+        try (AdminClient adminClient = AdminClient.create(getAdminProperties())) {
+            Collection<AclBinding> acls = adminClient.describeAcls(
+                    new org.apache.kafka.common.acl.AclBindingFilter(
+                            new org.apache.kafka.common.resource.ResourcePatternFilter(
+                                    ResourceType.TOPIC, TOPIC_NAME, ResourcePattern.WildcardType.LITERAL),
+                            null)
+            ).values().get();
 
-        // ✅ 1. Consume Messages from Kafka
-        KafkaSource<String> kafkaSource = KafkaSource.<String>builder()
-                .setBootstrapServers(BOOTSTRAP_SERVERS)
-                .setTopics(TEST_TOPIC)
-                .setGroupId(GROUP_ID)
-                .setStartingOffsets(OffsetsInitializer.earliest())
-                .setValueOnlyDeserializer(new SimpleStringSchema())
-                .setProperties(getSSLProperties()) // Add SSL properties
-                .build();
+            System.out.println("ACLs for topic: " + TOPIC_NAME);
+            for (AclBinding acl : acls) {
+                System.out.println("Principal: " + acl.entry().principal() +
+                        ", Operation: " + acl.entry().operation() +
+                        ", Permission: " + acl.entry().permissionType());
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to fetch ACLs: " + e.getMessage());
+        }
+    }
 
-        DataStream<String> stream = env.fromSource(
-                kafkaSource,
-                org.apache.flink.api.common.eventtime.WatermarkStrategy.noWatermarks(),
-                "Kafka Source"
-        );
-
-        stream.print(); // Print consumed messages
-
-        // ✅ 2. Produce Messages to Kafka
-        KafkaSink<String> kafkaSink = KafkaSink.<String>builder()
-                .setBootstrapServers(BOOTSTRAP_SERVERS)
-                .setKafkaProducerConfig(getSSLProperties())
-                .setRecordSerializer(KafkaRecordSerializationSchema.builder()
-                        .setTopic(TEST_TOPIC)
-                        .setValueSerializationSchema(new SimpleStringSchema())
-                        .build()
-                )
-                .build();
-
-        env.fromElements("Test message from Flink!")
-                .sinkTo(kafkaSink);
-
-        env.execute("Flink Kafka SSL Connectivity Test");
+    public static void main(String[] args) {
+        fetchAcls();
     }
 }
