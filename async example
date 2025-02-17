@@ -1,37 +1,84 @@
-import org.apache.flink.api.common.functions.RichFunction;
-import org.apache.flink.configuration.Configuration;
-import org.apache.flink.streaming.api.functions.async.AsyncFunction;
-import org.apache.flink.streaming.api.functions.async.ResultFuture;
-
+import org.apache.kafka.clients.admin.AdminClient;
+import org.apache.kafka.clients.admin.AdminClientConfig;
+import org.apache.kafka.clients.admin.ListTopicsResult;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import java.util.Properties;
 import java.util.Collections;
-import java.util.concurrent.*;
+import java.util.concurrent.TimeUnit;
 
-public class SampleAsyncFunction implements AsyncFunction<String, String> {
-    private transient ExecutorService executor;
-
-    @Override
-    public void open(Configuration parameters) {
-        executor = Executors.newFixedThreadPool(10);
+public class KafkaSSLConnectivityTest {
+    private static final String BOOTSTRAP_SERVERS = "broker1:9093,broker2:9093";
+    private static final String TEST_TOPIC = "test-topic";
+    private static final String GROUP_ID = "test-group";
+    private static final String MESSAGE = "Hello Kafka with SSL!";
+    
+    private static Properties getSSLProperties() {
+        Properties props = new Properties();
+        props.put("bootstrap.servers", BOOTSTRAP_SERVERS);
+        props.put("security.protocol", "SSL");
+        props.put("ssl.keystore.location", "/path/to/client.keystore.jks");
+        props.put("ssl.keystore.password", "keystore-password");
+        props.put("ssl.key.password", "key-password");
+        props.put("ssl.truststore.location", "/path/to/client.truststore.jks");
+        props.put("ssl.truststore.password", "truststore-password");
+        return props;
     }
 
-    @Override
-    public void asyncInvoke(String input, ResultFuture<String> resultFuture) {
-        CompletableFuture.supplyAsync(() -> performAsyncOperation(input), executor)
-                .thenAccept(result -> resultFuture.complete(Collections.singleton(result)));
-    }
-
-    private String performAsyncOperation(String input) {
-        try {
-            // Simulating an external async operation (e.g., REST API, Database)
-            Thread.sleep(1000);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
+    public static void checkKafkaConnection() {
+        try (AdminClient adminClient = AdminClient.create(getSSLProperties())) {
+            ListTopicsResult topics = adminClient.listTopics();
+            System.out.println("Kafka is reachable! Available topics: " + topics.names().get());
+        } catch (Exception e) {
+            System.err.println("Failed to connect to Kafka: " + e.getMessage());
         }
-        return "Processed-" + input;
     }
 
-    @Override
-    public void close() throws Exception {
-        executor.shutdown();
+    public static void produceTestMessage() {
+        Properties props = getSSLProperties();
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
+
+        try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
+            ProducerRecord<String, String> record = new ProducerRecord<>(TEST_TOPIC, "key", MESSAGE);
+            producer.send(record);
+            System.out.println("Test message sent successfully!");
+        } catch (Exception e) {
+            System.err.println("Failed to produce message: " + e.getMessage());
+        }
+    }
+
+    public static void consumeTestMessage() {
+        Properties props = getSSLProperties();
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, GROUP_ID);
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+
+        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
+            consumer.subscribe(Collections.singletonList(TEST_TOPIC));
+
+            ConsumerRecords<String, String> records = consumer.poll(TimeUnit.SECONDS.toMillis(5));
+            if (records.isEmpty()) {
+                System.out.println("No messages found in topic.");
+            } else {
+                for (ConsumerRecord<String, String> record : records) {
+                    System.out.println("Consumed message: " + record.value());
+                }
+            }
+        } catch (Exception e) {
+            System.err.println("Failed to consume message: " + e.getMessage());
+        }
+    }
+
+    public static void main(String[] args) {
+        checkKafkaConnection();  // Check Kafka connection
+        produceTestMessage();    // Produce a test message
+        consumeTestMessage();    // Consume a test message
     }
 }
