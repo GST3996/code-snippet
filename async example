@@ -1,84 +1,65 @@
-import org.apache.kafka.clients.admin.AdminClient;
-import org.apache.kafka.clients.admin.AdminClientConfig;
-import org.apache.kafka.clients.admin.ListTopicsResult;
-import org.apache.kafka.clients.consumer.ConsumerConfig;
-import org.apache.kafka.clients.consumer.ConsumerRecords;
-import org.apache.kafka.clients.consumer.KafkaConsumer;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
-import org.apache.kafka.clients.producer.KafkaProducer;
-import org.apache.kafka.clients.producer.ProducerConfig;
-import org.apache.kafka.clients.producer.ProducerRecord;
-import java.util.Properties;
-import java.util.Collections;
-import java.util.concurrent.TimeUnit;
+import org.apache.flink.api.common.serialization.SimpleStringSchema;
+import org.apache.flink.connector.kafka.sink.KafkaRecordSerializationSchema;
+import org.apache.flink.connector.kafka.sink.KafkaSink;
+import org.apache.flink.connector.kafka.source.KafkaSource;
+import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 
-public class KafkaSSLConnectivityTest {
+import java.util.Properties;
+
+public class FlinkKafkaSSLTest {
     private static final String BOOTSTRAP_SERVERS = "broker1:9093,broker2:9093";
     private static final String TEST_TOPIC = "test-topic";
-    private static final String GROUP_ID = "test-group";
-    private static final String MESSAGE = "Hello Kafka with SSL!";
-    
+    private static final String GROUP_ID = "flink-test-group";
+
     private static Properties getSSLProperties() {
         Properties props = new Properties();
-        props.put("bootstrap.servers", BOOTSTRAP_SERVERS);
-        props.put("security.protocol", "SSL");
-        props.put("ssl.keystore.location", "/path/to/client.keystore.jks");
-        props.put("ssl.keystore.password", "keystore-password");
-        props.put("ssl.key.password", "key-password");
-        props.put("ssl.truststore.location", "/path/to/client.truststore.jks");
-        props.put("ssl.truststore.password", "truststore-password");
+        props.setProperty("bootstrap.servers", BOOTSTRAP_SERVERS);
+        props.setProperty("security.protocol", "SSL");
+        props.setProperty("ssl.keystore.location", "/path/to/client.keystore.jks");
+        props.setProperty("ssl.keystore.password", "keystore-password");
+        props.setProperty("ssl.key.password", "key-password");
+        props.setProperty("ssl.truststore.location", "/path/to/client.truststore.jks");
+        props.setProperty("ssl.truststore.password", "truststore-password");
         return props;
     }
 
-    public static void checkKafkaConnection() {
-        try (AdminClient adminClient = AdminClient.create(getSSLProperties())) {
-            ListTopicsResult topics = adminClient.listTopics();
-            System.out.println("Kafka is reachable! Available topics: " + topics.names().get());
-        } catch (Exception e) {
-            System.err.println("Failed to connect to Kafka: " + e.getMessage());
-        }
-    }
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
 
-    public static void produceTestMessage() {
-        Properties props = getSSLProperties();
-        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
-        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringSerializer");
+        // ✅ 1. Consume Messages from Kafka
+        KafkaSource<String> kafkaSource = KafkaSource.<String>builder()
+                .setBootstrapServers(BOOTSTRAP_SERVERS)
+                .setTopics(TEST_TOPIC)
+                .setGroupId(GROUP_ID)
+                .setStartingOffsets(OffsetsInitializer.earliest())
+                .setValueOnlyDeserializer(new SimpleStringSchema())
+                .setProperties(getSSLProperties()) // Add SSL properties
+                .build();
 
-        try (KafkaProducer<String, String> producer = new KafkaProducer<>(props)) {
-            ProducerRecord<String, String> record = new ProducerRecord<>(TEST_TOPIC, "key", MESSAGE);
-            producer.send(record);
-            System.out.println("Test message sent successfully!");
-        } catch (Exception e) {
-            System.err.println("Failed to produce message: " + e.getMessage());
-        }
-    }
+        DataStream<String> stream = env.fromSource(
+                kafkaSource,
+                org.apache.flink.api.common.eventtime.WatermarkStrategy.noWatermarks(),
+                "Kafka Source"
+        );
 
-    public static void consumeTestMessage() {
-        Properties props = getSSLProperties();
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, GROUP_ID);
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, "org.apache.kafka.common.serialization.StringDeserializer");
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        stream.print(); // Print consumed messages
 
-        try (KafkaConsumer<String, String> consumer = new KafkaConsumer<>(props)) {
-            consumer.subscribe(Collections.singletonList(TEST_TOPIC));
+        // ✅ 2. Produce Messages to Kafka
+        KafkaSink<String> kafkaSink = KafkaSink.<String>builder()
+                .setBootstrapServers(BOOTSTRAP_SERVERS)
+                .setKafkaProducerConfig(getSSLProperties())
+                .setRecordSerializer(KafkaRecordSerializationSchema.builder()
+                        .setTopic(TEST_TOPIC)
+                        .setValueSerializationSchema(new SimpleStringSchema())
+                        .build()
+                )
+                .build();
 
-            ConsumerRecords<String, String> records = consumer.poll(TimeUnit.SECONDS.toMillis(5));
-            if (records.isEmpty()) {
-                System.out.println("No messages found in topic.");
-            } else {
-                for (ConsumerRecord<String, String> record : records) {
-                    System.out.println("Consumed message: " + record.value());
-                }
-            }
-        } catch (Exception e) {
-            System.err.println("Failed to consume message: " + e.getMessage());
-        }
-    }
+        env.fromElements("Test message from Flink!")
+                .sinkTo(kafkaSink);
 
-    public static void main(String[] args) {
-        checkKafkaConnection();  // Check Kafka connection
-        produceTestMessage();    // Produce a test message
-        consumeTestMessage();    // Consume a test message
+        env.execute("Flink Kafka SSL Connectivity Test");
     }
 }
