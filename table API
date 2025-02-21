@@ -1,0 +1,132 @@
+https://chatgpt.com/canvas/shared/67b843b1ea588191b2a14c4dab8fed4b
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.streaming.api.datastream.DataStream;
+import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.table.api.Table;
+import org.apache.flink.table.api.bridge.java.StreamTableEnvironment;
+
+public class DynamicJsonDeltaUpdate {
+
+    public static void main(String[] args) throws Exception {
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
+        StreamTableEnvironment tableEnv = StreamTableEnvironment.create(env);
+
+        ObjectMapper objectMapper = new ObjectMapper();
+
+        // 1️⃣ Delta stream with dynamic paramValue (JSON string)
+        DataStream<PersonDelta> deltaStream = env.fromElements(
+            new PersonDelta(1, "{\"address\": {\"city\": \"Chennai\", \"zipCode\": \"600001\"}}"),
+            new PersonDelta(2, "{\"name\": \"Bob\", \"age\": 40}")
+        );
+
+        // Convert delta entity stream to Flink table
+        tableEnv.createTemporaryView("delta_stream", deltaStream);
+
+        // 2️⃣ MongoDB lookup table to fetch matching documents by 'id'
+        tableEnv.executeSql(
+            "CREATE TABLE mongo_lookup (" +
+            " id INT," +
+            " document STRING," +  // Full MongoDB document as JSON string
+            " PRIMARY KEY (id) NOT ENFORCED" +
+            ") WITH (" +
+            " 'connector' = 'mongodb'," +
+            " 'uri' = 'mongodb://localhost:27017'," +
+            " 'database' = 'testdb'," +
+            " 'collection' = 'people'," +
+            " 'lookup.cache.max-rows' = '500'," +
+            " 'lookup.cache.ttl' = '10min'," +
+            " 'format' = 'json'" +
+            ")"
+        );
+
+        // 3️⃣ Merge delta paramValue into the existing MongoDB document
+        Table mergedResult = tableEnv.sqlQuery(
+            "SELECT d.id, d.paramValue, m.document " +
+            "FROM delta_stream d " +
+            "LEFT JOIN mongo_lookup FOR SYSTEM_TIME AS OF PROCTIME() m " +
+            "ON d.id = m.id"
+        );
+
+        // Convert the merged table to DataStream for JSON merging logic
+        DataStream<MergedRecord> mergedDataStream = tableEnv.toDataStream(mergedResult, MergedRecord.class)
+            .map((MapFunction<MergedRecord, MergedRecord>) record -> {
+                JsonNode originalDoc = record.document != null ? objectMapper.readTree(record.document) : objectMapper.createObjectNode();
+                JsonNode delta = objectMapper.readTree(record.paramValue);
+
+                // Merge delta into original document recursively
+                JsonNode mergedDoc = mergeJsonNodes((ObjectNode) originalDoc, (ObjectNode) delta);
+
+                record.document = objectMapper.writeValueAsString(mergedDoc);
+                return record;
+            });
+
+        // Register merged stream as a table
+        tableEnv.createTemporaryView("merged_stream", mergedDataStream);
+
+        // 4️⃣ Upsert the merged document back to MongoDB
+        tableEnv.executeSql(
+            "CREATE TABLE mongo_sink (" +
+            " id INT," +
+            " document STRING," +
+            " PRIMARY KEY (id) NOT ENFORCED" +
+            ") WITH (" +
+            " 'connector' = 'mongodb'," +
+            " 'uri' = 'mongodb://localhost:27017'," +
+            " 'database' = 'testdb'," +
+            " 'collection' = 'people'," +
+            " 'upsert' = 'true'," +
+            " 'format' = 'json'" +
+            ")"
+        );
+
+        // Insert merged data into MongoDB
+        tableEnv.executeSql("INSERT INTO mongo_sink SELECT id, document FROM merged_stream");
+
+        env.execute("Dynamic JSON Delta Update to MongoDB");
+    }
+
+    // Recursive method to merge delta JSON into original JSON
+    private static JsonNode mergeJsonNodes(ObjectNode original, ObjectNode delta) {
+        delta.fields().forEachRemaining(field -> {
+            JsonNode deltaValue = field.getValue();
+            String fieldName = field.getKey();
+
+            if (original.has(fieldName) && original.get(fieldName).isObject() && deltaValue.isObject()) {
+                mergeJsonNodes((ObjectNode) original.get(fieldName), (ObjectNode) deltaValue); // Recursive merge for nested objects
+            } else {
+                original.set(fieldName, deltaValue); // Overwrite or add field
+            }
+        });
+        return original;
+    }
+
+    // Entity representing delta record
+    public static class PersonDelta {
+        public Integer id;
+        public String paramValue;
+
+        public PersonDelta() {}
+        public PersonDelta(Integer id, String paramValue) {
+            this.id = id;
+            this.paramValue = paramValue;
+        }
+    }
+
+    // Entity representing merged output
+    public static class MergedRecord {
+        public Integer id;
+        public String paramValue;
+        public String document;
+
+        public MergedRecord() {}
+        public MergedRecord(Integer id, String paramValue, String document) {
+            this.id = id;
+            this.paramValue = paramValue;
+            this.document = document;
+        }
+    }
+}
